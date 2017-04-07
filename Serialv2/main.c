@@ -186,25 +186,22 @@ void freeAvlTree(AVLTree * tree, void (*freeItem)(void *)){
 }
 
 
-void printAvlRecursive(Node * root, void (*printItem)(FILE *, int, int, void *), FILE * output_file, int x, int y){
+void printAvlRecursive(Node * root, void (*printItem)(FILE *, void *), FILE * output_file){
   if (root != NULL){
-    printAvlRecursive(root->left, printItem, output_file, x, y);
-    printItem(output_file, x, y, root->item);
-    printAvlRecursive(root->right, printItem, output_file, x, y);
+    printAvlRecursive(root->left, printItem, output_file);
+    printItem(output_file, root->item);
+    printAvlRecursive(root->right, printItem, output_file);
   }
 }
 
-void printAvlTree(AVLTree * tree, void (*printItem)(FILE *, int, int, void *), FILE * output_file, int x, int y){
+void printAvlTree(AVLTree * tree, void (*printItem)(FILE *, void *), FILE * output_file){
   if(tree != NULL){
-    printAvlRecursive(tree->root, printItem, output_file, x, y);
+    printAvlRecursive(tree->root, printItem, output_file);
   }
 }
 
 // *********************************************************************************************************************
 // *********************************************************************************************************************
-
-
-
 
 
 
@@ -213,13 +210,15 @@ void printAvlTree(AVLTree * tree, void (*printItem)(FILE *, int, int, void *), F
 //                                            MAIN FILE
 // *********************************************************************************************************************
 // *********************************************************************************************************************
+
+// Tamnho da aresta do cubo
 int SIZE;
 
-#define cenas BADJORAS + 1
-
+// Estados possiveis de uma célula
 #define ALIVE 1
 #define DEAD 0
 
+// Pontos de vista dos vizinhos relativamente a uma célula
 #define TOP 0
 #define BOTTOM 1
 #define X_RIGHT 2
@@ -227,27 +226,35 @@ int SIZE;
 #define Y_RIGHT 4
 #define Y_LEFT 5
 
-#define GET_INDEX(x, y) (SIZE)*(y) + (x)
+#define GET_INDEX(x, y) (SIZE)*(x) + (y)
 
+// Normaliza as coordenadas, ou seja garante que o vizinho de uma fronteira é a fronteira oposta (sides wrap around)
 #define checkVectorLimits(c) ((c) == SIZE ? 0 : ((c) == -1 ? SIZE-1 : (c)))
 
+// Em função do ponto de vista obtem as coordenadas da célula vizinha
 #define POV_Z(i, z) ((i) == TOP     ? z+1 : ((i) == BOTTOM ? z-1 : (z)))
 #define POV_X(i, x) ((i) == X_RIGHT ? x+1 : ((i) == X_LEFT ? x-1 : (x)))
 #define POV_Y(i, y) ((i) == Y_RIGHT ? y+1 : ((i) == Y_LEFT ? y-1 : (y)))
 
+// Obtem as coordenadas da célula vizinha e normaliza-as
 #define GET_X(i, x) checkVectorLimits(POV_X(i, x))
 #define GET_Y(i, y) checkVectorLimits(POV_Y(i, y))
 #define GET_Z(i, z) checkVectorLimits(POV_Z(i, z))
 
-const int POV[] = {BOTTOM, TOP, X_LEFT, X_RIGHT, Y_LEFT, Y_RIGHT};
+//Converte o ponto de vista de uma célula para com a sua vizinha, no ponto de vista da vizinha para a primeira
+//POV original             TOP     BOTTOM X_RIGHT X_LEFT   Y_RIGHT Y_LEFT
+const int POV[] = {BOTTOM, TOP,   X_LEFT, X_RIGHT, Y_LEFT, Y_RIGHT};
+
 
 typedef struct cell{
   int x, y, z;
   int neighbors[6];
 } Cell;
 
+void printCell(FILE * output_file, void * cell){
+    fprintf(output_file, "%d %d %d\n", ((Cell *)cell)->x, ((Cell *)cell)->y, ((Cell *)cell)->z);
+}
 
-//Candidatas a macros!!
 int compareItems(void * a, void * b){
 if ( ((Cell*)a)->z < ((Cell*)b)->z){
     return SMALLER;
@@ -255,7 +262,6 @@ if ( ((Cell*)a)->z < ((Cell*)b)->z){
     return GREATER;
   }
 }
-
 
 int compareIdItem(int a, void * b){
   if (a == ((Cell*)b)->z ){
@@ -266,9 +272,6 @@ int compareIdItem(int a, void * b){
     return GREATER;
   }
 }
-
-
-//------------------------------------------------------------------------------
 
 void insertNewCellInAVL(AVLTree * tree, int x, int y, int z){
   Cell * new_cell;
@@ -283,12 +286,6 @@ void insertNewCellInAVL(AVLTree * tree, int x, int y, int z){
   insertAvlTree(tree, new_cell);
 }
 
-void printCell(FILE * output_file, int x, int y, void * cell){
-  if (cell != NULL){ //DEBUG
-    fprintf(output_file, "%d %d %d\n", x, y, ((Cell *)cell)->z);
-  }
-}
-
 AVLTree ** LoadMap(char * file_name){
   FILE * input_file;
   AVLTree ** map;
@@ -297,10 +294,8 @@ AVLTree ** LoadMap(char * file_name){
   input_file = fopen(file_name, "r");
 
   if (input_file == NULL || fscanf(input_file, "%d", &SIZE) != 1){
-    //printf("Erro no ficheiro de entrada\n");
     exit(0);
   }
-
 
   map = calloc(SIZE*SIZE, sizeof(AVLTree *)); //size^2 porque este vetor representa as coordenadas x e y simultaneamente (matriz)
   //map é logo inicializado a NULL porque é usado o calloc
@@ -320,8 +315,6 @@ AVLTree ** LoadMap(char * file_name){
   return map;
 }
 
-
-
 void addToNewGeneration(AVLTree ** next_map, int x, int y, int z, int nAliveNeighbors, int cell_state){
   if (nAliveNeighbors == 2 || nAliveNeighbors == 3 || (nAliveNeighbors == 4 && cell_state == ALIVE)){ // Condição para a proxima celula estar viva
 
@@ -333,6 +326,7 @@ void addToNewGeneration(AVLTree ** next_map, int x, int y, int z, int nAliveNeig
     // Aloca nova célula
     insertNewCellInAVL(next_map[GET_INDEX(x,y)], x, y, z);
   }
+
 }
 
 int visitNeighborsDead(AVLTree ** map, int x, int y, int z, int pov_caller){
@@ -348,7 +342,7 @@ int visitNeighborsDead(AVLTree ** map, int x, int y, int z, int pov_caller){
         // A célula vizinha está viva!!
         // Informa o vizinho sobre o estado da célula que o chamou
         neighbor_cell->neighbors[POV[i]] = DEAD;
-        count ++; // A célula vizinha foi encontrada, por isso está viva
+        count ++;
       }
     }
   }
@@ -356,30 +350,27 @@ int visitNeighborsDead(AVLTree ** map, int x, int y, int z, int pov_caller){
   return count;
 }
 
-
-
 int visitNeighborsAlive(AVLTree ** map, AVLTree ** next_map, Cell * current_cell){
   int i, nAliveNeighbors;
   int count = 0;
   Cell *  neighbor_cell;
 
-  for(i=0; i<6; i++){ //Vizita os 6 vizinhos de uma célula
+  for(i=0; i<6; i++){ //Visita os 6 vizinhos de uma célula
     if (current_cell->neighbors[i] == -1){
       neighbor_cell = findAvlTree(map[GET_INDEX(GET_X(i, current_cell->x), GET_Y(i, current_cell->y))], GET_Z(i, current_cell->z));
 
       if (neighbor_cell != NULL){
-        current_cell->neighbors[i] = ALIVE;
-
         // A célula vizinha está viva!!
         // Informa o vizinho sobre o estado da célula que o chamou
         neighbor_cell->neighbors[POV[i]] = ALIVE;
-        count ++; // A célula vizinha foi encontrada, por isso está viva
+        count ++;
 
-      } else { //Avaliada a célula morta (Todas as celulas mortas que renascem têm pelo menos uma célula viva)
+      } else {
+        //Avalia a célula morta (Todas as celulas mortas que renascem têm pelo menos uma célula viva como vizinha)
         current_cell->neighbors[i] = DEAD;
 
-        nAliveNeighbors = visitNeighborsDead(map, current_cell->x, current_cell->y, current_cell->z, POV[i]);
-        addToNewGeneration(next_map, current_cell->x, current_cell->y, current_cell->z, nAliveNeighbors, DEAD);
+        nAliveNeighbors = visitNeighborsDead(map, GET_X(i, current_cell->x), GET_Y(i, current_cell->y), GET_Z(i, current_cell->z), POV[i]);
+        addToNewGeneration(next_map, GET_X(i, current_cell->x), GET_Y(i, current_cell->y), GET_Z(i, current_cell->z), nAliveNeighbors, DEAD);
       }
     } else count += current_cell->neighbors[i];
   }
@@ -387,12 +378,12 @@ int visitNeighborsAlive(AVLTree ** map, AVLTree ** next_map, Cell * current_cell
   return count;
 }
 
-
 void searchTree(AVLTree ** map, AVLTree ** next_map, Node * root){
   Cell * current_cell;
   int nAliveNeighbors;
 
   if (root != NULL){
+    // Percorre a AVL Tree
     searchTree(map, next_map, root->left);
     searchTree(map, next_map, root->right);
 
@@ -424,15 +415,12 @@ void freeMapAVLTrees(AVLTree ** map){
 
 void writeOutput(char * file_name, AVLTree ** map){
   FILE * output_file;
-  int x, y;
+  int xy;
 
   output_file = fopen(file_name, "w");
 
-
-  for(x=0; x<SIZE; x++){
-    for(y=0; y<SIZE; y++){
-      printAvlTree(map[GET_INDEX(x,y)], printCell, output_file, x, y);
-    }
+  for(xy=0; xy<SIZE*SIZE; xy++){
+    printAvlTree(map[xy], printCell, output_file);
   }
 
   fclose(output_file);
@@ -470,7 +458,6 @@ int main(int argc, char *argv[]){
   }
 
   strcpy(file_name + strlen(file_name) - 2, "out\0"); //Substitui .in por .out
-
 
   writeOutput(file_name, map);
 

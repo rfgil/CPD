@@ -1,5 +1,5 @@
 default:
 	gcc -Wall -g -std=c99 main.c -o main
 
-profile: Estruturas/avl_tree.c
+profile: 
 	gcc -Wall -g -pg -std=c99 main.c -o main
