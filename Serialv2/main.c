@@ -186,17 +186,17 @@ void freeAvlTree(AVLTree * tree, void (*freeItem)(void *)){
 }
 
 
-void printAvlRecursive(Node * root, void (*printItem)(FILE *, void *), FILE * output_file){
+void printAvlRecursive(Node * root, void (*printItem)(void *)){
   if (root != NULL){
-    printAvlRecursive(root->left, printItem, output_file);
-    printItem(output_file, root->item);
-    printAvlRecursive(root->right, printItem, output_file);
+    printAvlRecursive(root->left, printItem);
+    printItem(root->item);
+    printAvlRecursive(root->right, printItem);
   }
 }
 
-void printAvlTree(AVLTree * tree, void (*printItem)(FILE *, void *), FILE * output_file){
+void printAvlTree(AVLTree * tree, void (*printItem)(void *)){
   if(tree != NULL){
-    printAvlRecursive(tree->root, printItem, output_file);
+    printAvlRecursive(tree->root, printItem);
   }
 }
 
@@ -251,8 +251,8 @@ typedef struct cell{
   int neighbors[6];
 } Cell;
 
-void printCell(FILE * output_file, void * cell){
-    fprintf(output_file, "%d %d %d\n", ((Cell *)cell)->x, ((Cell *)cell)->y, ((Cell *)cell)->z);
+void printCell(void * cell){
+    printf("%d %d %d\n", ((Cell *)cell)->x, ((Cell *)cell)->y, ((Cell *)cell)->z);
 }
 
 int compareItems(void * a, void * b){
@@ -413,23 +413,17 @@ void freeMapAVLTrees(AVLTree ** map){
   }
 }
 
-void writeOutput(char * file_name, AVLTree ** map){
-  FILE * output_file;
+void writeOutput(AVLTree ** map){
   int xy;
 
-  output_file = fopen(file_name, "w");
-
   for(xy=0; xy<SIZE*SIZE; xy++){
-    printAvlTree(map[xy], printCell, output_file);
+    printAvlTree(map[xy], printCell);
   }
-
-  fclose(output_file);
 }
 
 int main(int argc, char *argv[]){
   int i, n_generations;
   AVLTree ** map, ** next_map, ** aux_pointer;
-  char * file_name;
 
   if (argc != 3){
     //printf("Número argumentos não previsto\n");
@@ -441,10 +435,10 @@ int main(int argc, char *argv[]){
     exit(0);
   }
 
-  file_name = malloc((strlen(argv[1])+2)*sizeof(char));
-  strcpy(file_name, argv[1]);
+  //file_name = malloc((strlen(argv[1])+2)*sizeof(char));
+  //strcpy(file_name, argv[1]);
 
-  map = LoadMap(file_name);
+  map = LoadMap(argv[1]);
 
   next_map = malloc(SIZE*SIZE*sizeof(AVLTree *));
   for (i=0; i<n_generations; i++){
@@ -457,14 +451,14 @@ int main(int argc, char *argv[]){
     freeMapAVLTrees(next_map);
   }
 
-  strcpy(file_name + strlen(file_name) - 2, "out\0"); //Substitui .in por .out
+  //strcpy(file_name + strlen(file_name) - 2, "out\0"); //Substitui .in por .out
 
-  writeOutput(file_name, map);
+  writeOutput(map);
 
   freeMapAVLTrees(map);
   free(map);
   free(next_map);
-  free(file_name);
+  //free(file_name);
 
   return 0;
 }
