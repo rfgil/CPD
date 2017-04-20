@@ -216,7 +216,7 @@ void printAvlTree(AVLTree * tree, void (*printItem)(void *)){
 int SIZE;
 
 omp_lock_t * map_lock;
-omp_lock_t * neighbor_lock;
+omp_lock_t * deadcell_lock;
 
 // Estados possiveis de uma célula
 #define ALIVE 1
@@ -259,6 +259,10 @@ void printCell(void * cell){
     printf("%d %d %d\n", ((Cell *)cell)->x, ((Cell *)cell)->y, ((Cell *)cell)->z);
 }
 
+void myprint(void * cell){
+    printf("TESTE: %d %d %d\n", ((Cell *)cell)->x, ((Cell *)cell)->y, ((Cell *)cell)->z);
+}
+
 int compareItems(void * a, void * b){
 if ( ((Cell*)a)->z < ((Cell*)b)->z){
     return SMALLER;
@@ -288,9 +292,7 @@ void insertNewCellInAVL(AVLTree * tree, int x, int y, int z){
 
   memset(new_cell->neighbors, -1, 6*sizeof(int)); //Inicializa a memória com -1
 
-  omp_set_lock(&map_lock[GET_INDEX(x,y)]);
   insertAvlTree(tree, new_cell);
-  omp_unset_lock(&map_lock[GET_INDEX(x,y)]);
 }
 
 AVLTree ** LoadMap(char * file_name){
@@ -310,16 +312,11 @@ AVLTree ** LoadMap(char * file_name){
 
   // Iniciliza vetores de lock
   map_lock = malloc(SIZE*SIZE*sizeof(omp_lock_t));
+  deadcell_lock = malloc(SIZE*SIZE*sizeof(omp_lock_t));
   for(x=0; x<SIZE*SIZE; x++){
     omp_init_lock(&map_lock[x]);
+    omp_init_lock(&deadcell_lock[x]);
   }
-
-  /*
-  neighbor_lock = malloc(3*SIZE*sizeof(omp_lock_t));
-  for(x=0; x<3*SIZE; x++){
-    omp_init_lock(&neighbor_lock[x]);
-  }
-*/
 
   while(fscanf(input_file, "%d %d %d", &x, &y, &z) == 3){
     if (map[GET_INDEX(x,y)] == NULL){
@@ -339,6 +336,8 @@ AVLTree ** LoadMap(char * file_name){
 void addToNewGeneration(AVLTree ** next_map, int x, int y, int z, int nAliveNeighbors, int cell_state){
   if (nAliveNeighbors == 2 || nAliveNeighbors == 3 || (nAliveNeighbors == 4 && cell_state == ALIVE)){ // Condição para a proxima celula estar viva
 
+    omp_set_lock(&map_lock[GET_INDEX(x,y)]);
+
     // Verifica se árvore corresponde às coordenadas x e y da celula já está criada
     if (next_map[GET_INDEX(x,y)] == NULL){
         next_map[GET_INDEX(x,y)] = newAvlTree(compareItems, compareIdItem); //Inicializa a AVL
@@ -346,6 +345,7 @@ void addToNewGeneration(AVLTree ** next_map, int x, int y, int z, int nAliveNeig
 
     // Aloca nova célula
     insertNewCellInAVL(next_map[GET_INDEX(x,y)], x, y, z);
+    omp_unset_lock(&map_lock[GET_INDEX(x,y)]);
   }
 }
 
@@ -376,7 +376,7 @@ int visitNeighborsDead(AVLTree ** map, int x, int y, int z, int pov_caller){
 }
 
 int visitNeighborsAlive(AVLTree ** map, AVLTree ** next_map, Cell * current_cell){
-  int i, nAliveNeighbors;//, deadCellCoordSum;
+  int i, nAliveNeighbors;
   int count = 0;
   Cell *  neighbor_cell;
 
@@ -393,18 +393,14 @@ int visitNeighborsAlive(AVLTree ** map, AVLTree ** next_map, Cell * current_cell
 
       } else {
         //Avalia a célula morta (Todas as celulas mortas que renascem têm pelo menos uma célula viva como vizinha)
-        //current_cell->neighbors[i] = DEAD;
 
-        //deadCellCoordSum = GET_X(i, current_cell->x) + GET_Y(i, current_cell->y) + GET_Z(i, current_cell->z);
-        //omp_set_lock(&neighbor_lock[deadCellCoordSum]);
-
+        omp_set_lock(&deadcell_lock[GET_INDEX(GET_X(i, current_cell->x), GET_Y(i, current_cell->y))]);
+        current_cell->neighbors[i] = DEAD;
         nAliveNeighbors = visitNeighborsDead(map, GET_X(i, current_cell->x), GET_Y(i, current_cell->y), GET_Z(i, current_cell->z), POV[i]);
+        omp_unset_lock(&deadcell_lock[GET_INDEX(GET_X(i, current_cell->x), GET_Y(i, current_cell->y))]);
 
-        //omp_unset_lock(&neighbor_lock[deadCellCoordSum]);
 
         addToNewGeneration(next_map, GET_X(i, current_cell->x), GET_Y(i, current_cell->y), GET_Z(i, current_cell->z), nAliveNeighbors, DEAD);
-
-
       }
     } else count += current_cell->neighbors[i];
   }
@@ -432,7 +428,7 @@ void getNextGeneration(AVLTree ** map, AVLTree ** next_map){
 
   memset(next_map, 0, SIZE*SIZE*sizeof(AVLTree *)); //Inicializa o vetor next_map com o valor NULL
 
-  #pragma omp parallel for // private(xy)
+  #pragma omp parallel for private(xy)
   for(xy= 0; xy<SIZE*SIZE; xy++){
     //printf("%d\n", omp_get_thread_num());
     if (map[xy] != NULL){
@@ -444,7 +440,7 @@ void getNextGeneration(AVLTree ** map, AVLTree ** next_map){
 void freeMapAVLTrees(AVLTree ** map){
   int xy;
 
-  //Passivel de ser paralelizado
+  #pragma omp parallel for private(xy)
   for(xy=0; xy<SIZE*SIZE; xy++){
       freeAvlTree(map[xy], free);
   }
@@ -495,8 +491,10 @@ int main(int argc, char *argv[]){
   free(map);
   free(next_map);
 
+  #pragma omp parallel for private(i)
   for(i=0;i<SIZE*SIZE; i++){
     omp_destroy_lock(&map_lock[i]);
+    omp_destroy_lock(&deadcell_lock[i]);
   }
 
   //end_time = omp_get_wtime();
