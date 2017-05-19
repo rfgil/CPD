@@ -217,19 +217,6 @@ int compareIdItem(int a, void * b){
  }
 }
 
-int serializeAVLTreeRecursive(AVLNode * root, int * buffer, int index){
-  Cell * cell;
-  if (root != NULL){
-    index = serializeAVLTreeRecursive(root->left, buffer, index);
-
-    cell = (Cell *) root->item;
-    buffer[index++] = cell->z;
-
-    index = serializeAVLTreeRecursive(root->right, buffer, index);
-  }
-
-  return index;
-}
 
 // *********************************************************************************************************************
 //                                            LISTA
@@ -320,23 +307,19 @@ void sendList(List * list, int dest, int tag){
   int * serialized;
   serialized = serializeList(list);
   MPI_Send(serialized, 3*list->counter, MPI_INT, dest, tag, MPI_COMM_WORLD);
+
   free(serialized);
   resetList(list);
 }
 
-void sendAVLTree(AVLTree * avl_tree, int xy, int dest, int tag){
+int * sendListNoBlock(List * list, int dest, int tag, MPI_Request * request){
   int * serialized;
-  serialized = (int *) malloc((avl_tree->n_elements + 1)*sizeof(int));
-
-  serialized[0] = xy;
-  serializeAVLTreeRecursive(avl_tree->root, serialized, 1);
-
-  MPI_Send(serialized, avl_tree->n_elements + 1, MPI_INT, dest, tag, MPI_COMM_WORLD);
-  free(serialized);
+  serialized = serializeList(list);
+  MPI_Isend(serialized, 3*list->counter, MPI_INT, dest, tag, MPI_COMM_WORLD, request);
+  //free(serialized);
+  resetList(list);
+  return serialized;
 }
-
-
-
 
 
 
@@ -354,21 +337,15 @@ void printAvlTree(AVLTree * tree, void (*printItem)(void *)){
   }
 }
 
-void fromAVLTreeToListRecursive(AVLNode * root, List * list){
+void AVLTreeToListRecursive(AVLNode * root, List * buffer_list){
   Cell * cell;
   if (root != NULL){
-    fromAVLTreeToListRecursive(root->left, list);
+    AVLTreeToListRecursive(root->left, buffer_list);
 
     cell = (Cell *) root->item;
-    insertList(list, cell->x, cell->y, cell->z);
+    insertList(buffer_list, cell->x, cell->y, cell->z);
 
-    fromAVLTreeToListRecursive(root->right, list);
-  }
-}
-
-void fromAVLTreeToList(AVLTree * tree, List * list){
-  if(tree != NULL){
-    fromAVLTreeToListRecursive(tree->root, list);
+    AVLTreeToListRecursive(root->right, buffer_list);
   }
 }
 
@@ -427,6 +404,8 @@ const int POV[] = {BOTTOM, TOP,    X_LEFT,  X_RIGHT, Y_LEFT, Y_RIGHT};
 // Devolve o primeiro index que o processador 'processor' deve processar
 #define FIRST_INDEX(processor) ((processor) < BOT_COUNT ? BOT_SIZE * PROCESSOR_ID : BOT_SIZE*BOT_COUNT + (PROCESSOR_ID - BOT_COUNT)*TOP_SIZE)
 
+#define NORMALIZE_X(x) ((x) == SIZE ? -1 : ((x) == -1 ? SIZE : (x)))
+
 // Normaliza/Desnormaliza um index para determinado processador
 #define NORMALIZE_INDEX(index, processor) (index) - FIRST_INDEX(processor) + SIZE
 #define DENORMALIZE_INDEX(normalized_index, processor) (normalized_index) + FIRST_INDEX(processor) - SIZE
@@ -443,6 +422,14 @@ void setPartitionsSize(){
   //if (!PROCESSOR_ID){
   //  printf("TOP_SIZE: %d\nBOT_SIZE: %d\n", TOP_SIZE, BOT_SIZE);
   //}
+
+  if(N_PROCESSORS > SIZE){
+    // A cada processador com rank menor que size é atribuido um plano de z
+    N_PROCESSORS = SIZE;
+    BOT_COUNT = SIZE;
+    BOT_SIZE = SIZE;
+    return;
+  }
 
   if (TOP_SIZE == BOT_SIZE){
     TOP_COUNT = 0;
@@ -552,6 +539,11 @@ AVLTree ** receiveMap(){
   }
 
   setPartitionsSize();
+
+  if(PROCESSOR_ID >= N_PROCESSORS){
+    MPI_Finalize();
+  }
+
   map = (AVLTree **) calloc(PROCESSOR_CHUNK_SIZE(PROCESSOR_ID) + 2*SIZE, sizeof(AVLTree *));
 
   buffer = (int*) malloc(3*MAX_BUFFER_SIZE*sizeof(int));
@@ -579,88 +571,90 @@ AVLTree ** receiveMap(){
   return map;
 }
 
-void sendBorders(AVLTree ** map){
-  int index, pov_index, x, y;
-  int xy;
-
-  // Avalia só as posições que pertencem a este processador
-  for (int norm_index = SIZE; norm_index < SIZE + PROCESSOR_CHUNK_SIZE(PROCESSOR_ID); norm_index++){
-    index = DENORMALIZE_INDEX(norm_index, PROCESSOR_ID);
-    x = INDEX_TO_X(index);
-    y = INDEX_TO_Y(index);
-
-    if (map[norm_index] != NULL){
-      //Se existir pelo menos uma célula
-
-      for(int pov = X_RIGHT; pov<=Y_LEFT; pov++){
-        // Verifica vizinhos de index no plano XY (em Z os vizinhos pertencem de certeza a este processador)
-        pov_index = GET_INDEX(GET_X(pov, x), GET_Y(pov, y));
-
-        if (GET_PROCESSOR(pov_index) != PROCESSOR_ID){
-          // Se o vizinho pertence a outro processador a própria célula é enviada
-
-          if (POV_X(pov, x) == SIZE){
-            xy = GET_INDEX(-1, y);
-
-          } else if(POV_X(pov, x) == -1){
-            xy = GET_INDEX(SIZE, y);
-
-          } else {
-            xy = index;
-          }
-
-          sendAVLTree(map[norm_index], xy, GET_PROCESSOR(pov_index), BORDERS_TAG);
-        }
-      }
-    }
-  }
-
-  // Envia para os restantes processadores mensagem de tamanho 0 para indicar que este processador terminou
-  for (index = 0; index<N_PROCESSORS; index++){
-    if (index != PROCESSOR_ID){
-      MPI_Send(&index, 0, MPI_INT, index, BORDERS_TAG, MPI_COMM_WORLD);
-    }
-  }
-
-}
-
 void receiveBorders(AVLTree ** map, int proc){
   MPI_Status status;
   int * buffer;
-  int counter, i, xy;
+  int counter, i;
+  int norm_x;
   int x, y, z;
   int norm_index;
 
-  buffer = (int *) malloc((SIZE + 1)*sizeof(int));
+  buffer = (int *) malloc(3*SIZE*SIZE*sizeof(int));
 
+  MPI_Recv(buffer, 3*SIZE*SIZE, MPI_INT, proc, BORDERS_TAG, MPI_COMM_WORLD, &status);
+  MPI_Get_count(&status, MPI_INT, &counter);
 
-  do {
-    MPI_Recv(buffer, MAX_BUFFER_SIZE, MPI_INT, proc, BORDERS_TAG, MPI_COMM_WORLD, &status);
-    MPI_Get_count(&status, MPI_INT, &counter);
+  i = 0;
+  while(i < counter){
+    x = buffer[i++];
+    y = buffer[i++];
+    z = buffer[i++];
 
-    if (counter == 0){
-      break;
+    // Normaliza a coordenada x
+    if (x == SIZE - 1){
+      norm_x = -1;
+    } else if(x == 0){
+      norm_x = SIZE;
+    } else {
+      norm_x = x;
     }
 
-    xy = buffer[0];
+    norm_index = NORMALIZE_INDEX(GET_INDEX(norm_x, y), PROCESSOR_ID);
 
-    x = INDEX_TO_X(xy); // LIXO
-    y = INDEX_TO_Y(xy); // LIXO
-
-    i = 1;
-    while(i < counter){
-      z = buffer[i++];
-
-      norm_index = NORMALIZE_INDEX(xy, PROCESSOR_ID);
-
-      if (map[norm_index] == NULL){ // Inicializa a AVL
-        map[norm_index] = newAvlTree(compareItems, compareIdItem);
-      }
-
-      insertNewCellInAVL(map[norm_index], x, y, z);
+    if (map[norm_index] == NULL){ // Inicializa a AVL
+      map[norm_index] = newAvlTree(compareItems, compareIdItem);
     }
-  } while(1);
 
+    // Não ha problema de x "não estar correcto", desde que a célula seja inserida na posição xy normalizada certa
+    insertNewCellInAVL(map[norm_index], x, y, z);
+  }
+}
+
+void sendBorders(AVLTree ** map){
+  MPI_Request request;
+  MPI_Status status;
+
+  List ** buffer_list;
+  int norm_index;
+  int prev_processor, next_processor;
+
+  int * send_buffer;
+
+  // inicializa buffer
+  buffer_list = (List **) malloc(2* sizeof(List *));
+
+  buffer_list[0] = newList();
+  buffer_list[1] = newList();
+
+  prev_processor = PROCESSOR_ID == 0 ? N_PROCESSORS - 1 : PROCESSOR_ID - 1;
+  next_processor = PROCESSOR_ID == N_PROCESSORS - 1 ? 0 : PROCESSOR_ID + 1;
+
+  // Fronteira com processador anterior
+  for(norm_index = SIZE; norm_index < SIZE + SIZE; norm_index ++){
+    AVLTreeToListRecursive(map[norm_index] == NULL ? NULL : map[norm_index]->root, buffer_list[0]);
+  }
+
+  send_buffer = sendListNoBlock(buffer_list[0], prev_processor, BORDERS_TAG, &request);
+  // Aproveita latência da transferencia
+
+  // Fronteira com vizinho seguinte
+  for(norm_index = PROCESSOR_CHUNK_SIZE(PROCESSOR_ID); norm_index < PROCESSOR_CHUNK_SIZE(PROCESSOR_ID) + SIZE; norm_index ++){
+    AVLTreeToListRecursive(map[norm_index] == NULL ? NULL : map[norm_index]->root, buffer_list[1]);
+  }
+
+  receiveBorders(map, next_processor);
+  MPI_Wait(&request, &status);
+  free(send_buffer);
+
+  send_buffer = sendListNoBlock(buffer_list[1], next_processor, BORDERS_TAG, &request);
+
+  receiveBorders(map, prev_processor);
+  MPI_Wait(&request, &status);
+  free(send_buffer);
+
+  freeList(buffer_list[0]);
+  freeList(buffer_list[1]);
+  free(buffer_list);
 }
 
 void addToNewGeneration(AVLTree ** next_map, int x, int y, int z, int nAliveNeighbors, int cell_state){
@@ -680,8 +674,7 @@ int visitNeighborsDead(AVLTree ** map, int x, int y, int z, int pov_caller){
   int i;
   int count = 1; //Uma célula morta só é chamada por uma célula viva!
   Cell *  neighbor_cell;
-
-
+  int neighbor_x, neighbor_y, neighbor_z;
 
   if (NORMALIZE_INDEX(GET_INDEX(x,y), PROCESSOR_ID) < SIZE ||
       NORMALIZE_INDEX(GET_INDEX(x,y), PROCESSOR_ID) > SIZE + PROCESSOR_CHUNK_SIZE(PROCESSOR_ID)){
@@ -691,13 +684,19 @@ int visitNeighborsDead(AVLTree ** map, int x, int y, int z, int pov_caller){
 
   for(i=0; i<6; i++){ // Visita os 6 vizinhos de uma célula
     if (i != pov_caller){
-      /*
-      if (x==0 && y==1 && z==0){
-        printf("POV_CALLER %d\n", pov_caller);
-        printf("XY %d Z %d POV %d\n", NORMALIZE_INDEX(GET_INDEX(POV_X(i, x), GET_Y(i, y)), PROCESSOR_ID), GET_Z(i, z), i);
+      neighbor_x = POV_X(i, x);
+      neighbor_y = GET_Y(i, y);
+      neighbor_z = GET_Z(i, z);
+
+      if (NORMALIZE_INDEX(GET_INDEX(neighbor_x,neighbor_y), PROCESSOR_ID) < SIZE ||
+          NORMALIZE_INDEX(GET_INDEX(neighbor_x,neighbor_y), PROCESSOR_ID) > SIZE + PROCESSOR_CHUNK_SIZE(PROCESSOR_ID)){
+          // Se estiver fora dos indices de interesse do processador
+          continue; // É considerada como morta
       }
-*/
-      neighbor_cell = (Cell *) findAvlTree(map[NORMALIZE_INDEX(GET_INDEX(POV_X(i, x), GET_Y(i, y)), PROCESSOR_ID)], GET_Z(i, z));
+
+      //printf("(%d) DEAD: %d %d %d CALLER: %d %d %d\n", PROCESSOR_ID, neighbor_x, neighbor_y, neighbor_z, x, y, z);
+
+      neighbor_cell = (Cell *) findAvlTree(map[NORMALIZE_INDEX(GET_INDEX(neighbor_x, neighbor_y), PROCESSOR_ID)], neighbor_z);
 
       if (neighbor_cell != NULL){
         //printf("NEIGHBOR: %d %d %d\n", neighbor_cell->x, neighbor_cell->y, neighbor_cell->z);
@@ -718,12 +717,19 @@ int visitNeighborsDead(AVLTree ** map, int x, int y, int z, int pov_caller){
 int visitNeighborsAlive(AVLTree ** map, AVLTree ** next_map, Cell * current_cell){
   int i, nAliveNeighbors;
   int count = 0;
+
   Cell *  neighbor_cell;
+  int neighbor_x, neighbor_y, neighbor_z;
 
   for(i=0; i<6; i++){ //Visita os 6 vizinhos de uma célula
     if (current_cell->neighbors[i] == -1){
-      neighbor_cell = (Cell *) findAvlTree(map[NORMALIZE_INDEX(GET_INDEX(POV_X(i, current_cell->x), GET_Y(i, current_cell->y)), PROCESSOR_ID)],
-                                            GET_Z(i, current_cell->z));
+      neighbor_x = POV_X(i, current_cell->x);
+      neighbor_y = GET_Y(i, current_cell->y);
+      neighbor_z = GET_Z(i, current_cell->z);
+
+      //printf("(%d) ALIVE: %d %d %d CALLER: %d %d %d\n", PROCESSOR_ID, neighbor_x, neighbor_y, neighbor_z, current_cell->x, current_cell->y, current_cell->z);
+
+      neighbor_cell = (Cell *) findAvlTree(map[NORMALIZE_INDEX(GET_INDEX(neighbor_x, neighbor_y), PROCESSOR_ID)], neighbor_z);
 
       if (neighbor_cell != NULL){
         // A célula vizinha está viva!!
@@ -735,8 +741,8 @@ int visitNeighborsAlive(AVLTree ** map, AVLTree ** next_map, Cell * current_cell
         //Avalia a célula morta (Todas as celulas mortas que renascem têm pelo menos uma célula viva como vizinha)
         current_cell->neighbors[i] = DEAD;
 
-        nAliveNeighbors = visitNeighborsDead(map, GET_X(i, current_cell->x), GET_Y(i, current_cell->y), GET_Z(i, current_cell->z), POV[i]);
-        addToNewGeneration(next_map, GET_X(i, current_cell->x), GET_Y(i, current_cell->y), GET_Z(i, current_cell->z), nAliveNeighbors, DEAD);
+        nAliveNeighbors = visitNeighborsDead(map, neighbor_x, neighbor_y, neighbor_z, POV[i]);
+        addToNewGeneration(next_map, neighbor_x, neighbor_y, neighbor_z, nAliveNeighbors, DEAD);
       }
     } else count += current_cell->neighbors[i];
   }
@@ -813,13 +819,15 @@ void writeOutput(AVLTree ** map){
 void sendOutput(AVLTree ** map){
   List * buffer_list;
 
-  buffer_list = (List *) malloc(sizeof(List));
+  buffer_list = newList();
 
   for(int xy=SIZE; xy<SIZE + PROCESSOR_CHUNK_SIZE(PROCESSOR_ID); xy++){
-    fromAVLTreeToList(map[xy], buffer_list);
+    if (map[xy] != NULL){
+      AVLTreeToListRecursive(map[xy]->root, buffer_list);
 
-    if (buffer_list->counter == MAX_BUFFER_SIZE){
-      sendList(buffer_list, 0, PRINT_TAG);
+      if (buffer_list->counter == MAX_BUFFER_SIZE){
+        sendList(buffer_list, 0, PRINT_TAG);
+      }
     }
   }
 
@@ -835,14 +843,15 @@ int main(int argc, char *argv[]){
   MPI_Comm_rank (MPI_COMM_WORLD, &PROCESSOR_ID);
   MPI_Comm_size (MPI_COMM_WORLD, &N_PROCESSORS);
 
+
   /*
   if (argc < 3 || sscanf(argv[2],"%d", &n_generations) != 1){
     // printf("Número argumentos insuficiente\n");
     // printf("O segundo argumento não é um inteiro\n");
     MPI_Finalize();
     exit(0);
-  }*/
-
+  }
+*/
   n_generations = 1;
 
   MPI_Barrier(MPI_COMM_WORLD);
@@ -858,26 +867,14 @@ int main(int argc, char *argv[]){
 
   MPI_Barrier(MPI_COMM_WORLD);
 
-  next_map = (AVLTree **)malloc((PROCESSOR_CHUNK_SIZE(PROCESSOR_ID) + 2*SIZE)*sizeof(AVLTree *));
+  next_map = (AVLTree **) malloc((PROCESSOR_CHUNK_SIZE(PROCESSOR_ID) + 2*SIZE)*sizeof(AVLTree *));
 
   for (i=0; i<n_generations; i++){
+
     // Troca fronteiras
-    for (int proc=0; proc<N_PROCESSORS; proc++){
-      if (PROCESSOR_ID == proc){
-        sendBorders(map);
-      } else {
-        receiveBorders(map, proc);
-      }
-    }
+    sendBorders(map);
 
-    //for(int i=0; i<(PROCESSOR_CHUNK_SIZE(PROCESSOR_ID) + 2*SIZE); i++){
-    for(int i=0; i<SIZE + SIZE; i++){
-      if(map[i] != NULL){
-        //printf("RANK%d index: %d\n", PROCESSOR_ID, i);
-        printAvlTree(map[i], printCell);
-      }
-    }
-
+    // Calcula próxima geração
     getNextGeneration(map, next_map);
 
     // Troca ponteiros
@@ -885,10 +882,23 @@ int main(int argc, char *argv[]){
     map = next_map;
     next_map = aux_pointer;
 
-
     // Apaga fronteira anterior
     memset(map, 0, SIZE);
     memset(map + SIZE + PROCESSOR_CHUNK_SIZE(PROCESSOR_ID), 0, SIZE);
+
+    /*
+    if (PROCESSOR_ID){
+      for(int i=0; i<(2*SIZE + PROCESSOR_CHUNK_SIZE(PROCESSOR_ID)); i++){
+        if(map[i] != NULL){
+          //printf("RANK%d index: %d\n", PROCESSOR_ID, i);
+
+          printAvlTree(map[i], printCell);
+          printf("%d\n", i);
+        }
+      }
+      printf("--------------------------------\n");
+    }
+    */
 
     freeMapAVLTrees(next_map);
   }
@@ -904,7 +914,6 @@ int main(int argc, char *argv[]){
     // send result
     sendOutput(map);
   }
-
 
   MPI_Finalize();
 
