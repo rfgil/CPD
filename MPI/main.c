@@ -285,6 +285,21 @@ void freeList(List * list){
   }
 }
 
+int serializeAndFreeList(ListNode * node, int * buffer, int index){
+  if (node != NULL){
+
+    index = serializeAndFreeList(node->next, buffer, index);
+
+    buffer[index++] = node->x;
+    buffer[index++] = node->y;
+    buffer[index++] = node->z;
+
+    free(node);
+  }
+
+  return index;
+}
+
 int * serializeList(List * list){
   int * buffer;
   ListNode * aux = list->first_node;
@@ -305,11 +320,15 @@ int * serializeList(List * list){
 
 void sendList(List * list, int dest, int tag){
   int * serialized;
-  serialized = serializeList(list);
-  MPI_Send(serialized, 3*list->counter, MPI_INT, dest, tag, MPI_COMM_WORLD);
 
+  serialized = (int *) malloc(3*list->counter*sizeof(int));
+  serializeAndFreeList(list->first_node, serialized, 0);
+  list->first_node = NULL;
+
+  //serialized = serializeList(list);
+  MPI_Send(serialized, 3*list->counter, MPI_INT, dest, tag, MPI_COMM_WORLD);
   free(serialized);
-  resetList(list);
+  //resetList(list);
 }
 
 int * sendListNoBlock(List * list, int dest, int tag, MPI_Request * request){
@@ -404,7 +423,8 @@ const int POV[] = {BOTTOM, TOP,    X_LEFT,  X_RIGHT, Y_LEFT, Y_RIGHT};
 // Devolve o primeiro index que o processador 'processor' deve processar
 #define FIRST_INDEX(processor) ((processor) < BOT_COUNT ? BOT_SIZE * PROCESSOR_ID : BOT_SIZE*BOT_COUNT + (PROCESSOR_ID - BOT_COUNT)*TOP_SIZE)
 
-#define NORMALIZE_X(x) ((x) == SIZE ? -1 : ((x) == -1 ? SIZE : (x)))
+//#define NORMALIZE_X(x) ((x) == SIZE ? - 1 : ((x) == -1 ? SIZE : (x)))
+#define NORMALIZE_X(x) (PROCESSOR_ID == 0 && x == SIZE - 1 ? -1 : (PROCESSOR_ID == N_PROCESSORS - 1 && x == 0 ? SIZE : (x)))
 
 // Normaliza/Desnormaliza um index para determinado processador
 #define NORMALIZE_INDEX(index, processor) (index) - FIRST_INDEX(processor) + SIZE
@@ -423,17 +443,26 @@ void setPartitionsSize(){
   //  printf("TOP_SIZE: %d\nBOT_SIZE: %d\n", TOP_SIZE, BOT_SIZE);
   //}
 
-  if(N_PROCESSORS > SIZE){
-    // A cada processador com rank menor que size é atribuido um plano de z
-    N_PROCESSORS = SIZE;
-    BOT_COUNT = SIZE;
-    BOT_SIZE = SIZE;
-    return;
-  }
-
   if (TOP_SIZE == BOT_SIZE){
     TOP_COUNT = 0;
     BOT_COUNT = n_squared / BOT_SIZE;
+
+    //if (!PROCESSOR_ID){
+    //  printf("%d chunks de tamanho %d\n", BOT_COUNT, BOT_SIZE);
+    //}
+    return;
+  }
+
+  if(N_PROCESSORS > SIZE){
+    // A cada processador com rank com id menor que size é atribuido um plano de z
+    N_PROCESSORS = SIZE;
+    BOT_COUNT = SIZE;
+    BOT_SIZE = SIZE;
+
+    //if (!PROCESSOR_ID){
+    //  printf("%d chunks de tamanho %d\n", BOT_COUNT, BOT_SIZE);
+    //}
+
     return;
   }
 
@@ -441,7 +470,7 @@ void setPartitionsSize(){
     for (BOT_COUNT = 1; BOT_COUNT < n_squared/BOT_SIZE; BOT_COUNT++){
       if (TOP_SIZE*TOP_COUNT + BOT_SIZE*BOT_COUNT == n_squared){
         //if (!PROCESSOR_ID){
-          //printf("%d chunks de tamanho %d\n%d chunks de tamanho %d\n", BOT_COUNT, BOT_SIZE, TOP_COUNT, TOP_SIZE);
+        //  printf("%d chunks de tamanho %d e %d chunks de tamanho %d\n", BOT_COUNT, BOT_SIZE, TOP_COUNT, TOP_SIZE);
         //}
         return;
       }
@@ -532,16 +561,12 @@ AVLTree ** receiveMap(){
   int x, y, z;
 
   MPI_Bcast(&SIZE, 1, MPI_INT, 0, MPI_COMM_WORLD);
-  if(SIZE == 0){
+  setPartitionsSize();
+
+  if(SIZE == 0 || PROCESSOR_ID >= N_PROCESSORS){
     // Ocorreu um erro ao ler o ficheiro de entrada no processador 0
     MPI_Finalize();
     exit(0);
-  }
-
-  setPartitionsSize();
-
-  if(PROCESSOR_ID >= N_PROCESSORS){
-    MPI_Finalize();
   }
 
   map = (AVLTree **) calloc(PROCESSOR_CHUNK_SIZE(PROCESSOR_ID) + 2*SIZE, sizeof(AVLTree *));
@@ -591,6 +616,7 @@ void receiveBorders(AVLTree ** map, int proc){
     z = buffer[i++];
 
     // Normaliza a coordenada x
+    /*
     if (x == SIZE - 1){
       norm_x = -1;
     } else if(x == 0){
@@ -598,6 +624,9 @@ void receiveBorders(AVLTree ** map, int proc){
     } else {
       norm_x = x;
     }
+    */
+
+    norm_x = NORMALIZE_X(x);
 
     norm_index = NORMALIZE_INDEX(GET_INDEX(norm_x, y), PROCESSOR_ID);
 
@@ -674,10 +703,13 @@ int visitNeighborsDead(AVLTree ** map, int x, int y, int z, int pov_caller){
   int i;
   int count = 1; //Uma célula morta só é chamada por uma célula viva!
   Cell *  neighbor_cell;
-  int neighbor_x, neighbor_y, neighbor_z;
 
-  if (NORMALIZE_INDEX(GET_INDEX(x,y), PROCESSOR_ID) < SIZE ||
-      NORMALIZE_INDEX(GET_INDEX(x,y), PROCESSOR_ID) > SIZE + PROCESSOR_CHUNK_SIZE(PROCESSOR_ID)){
+  int neighbor_x, neighbor_y, neighbor_z;
+  int neighbor_index, index;
+
+  index = NORMALIZE_INDEX(GET_INDEX(x,y), PROCESSOR_ID);
+
+  if (index < SIZE || index >= SIZE + PROCESSOR_CHUNK_SIZE(PROCESSOR_ID)){
       // Se estiver fora dos indices de interesse do processador
       return 0; // É considerada como morta
   }
@@ -688,15 +720,14 @@ int visitNeighborsDead(AVLTree ** map, int x, int y, int z, int pov_caller){
       neighbor_y = GET_Y(i, y);
       neighbor_z = GET_Z(i, z);
 
-      if (NORMALIZE_INDEX(GET_INDEX(neighbor_x,neighbor_y), PROCESSOR_ID) < SIZE ||
-          NORMALIZE_INDEX(GET_INDEX(neighbor_x,neighbor_y), PROCESSOR_ID) > SIZE + PROCESSOR_CHUNK_SIZE(PROCESSOR_ID)){
+      neighbor_index = NORMALIZE_INDEX(GET_INDEX(neighbor_x,neighbor_y), PROCESSOR_ID);
+
+      if (neighbor_index < 0 || neighbor_index > 2*SIZE + PROCESSOR_CHUNK_SIZE(PROCESSOR_ID) - 1){
           // Se estiver fora dos indices de interesse do processador
           continue; // É considerada como morta
       }
 
-      //printf("(%d) DEAD: %d %d %d CALLER: %d %d %d\n", PROCESSOR_ID, neighbor_x, neighbor_y, neighbor_z, x, y, z);
-
-      neighbor_cell = (Cell *) findAvlTree(map[NORMALIZE_INDEX(GET_INDEX(neighbor_x, neighbor_y), PROCESSOR_ID)], neighbor_z);
+      neighbor_cell = (Cell *) findAvlTree(map[neighbor_index], neighbor_z);
 
       if (neighbor_cell != NULL){
         //printf("NEIGHBOR: %d %d %d\n", neighbor_cell->x, neighbor_cell->y, neighbor_cell->z);
@@ -709,17 +740,15 @@ int visitNeighborsDead(AVLTree ** map, int x, int y, int z, int pov_caller){
     }
   }
 
-
-
   return count;
 }
 
-int visitNeighborsAlive(AVLTree ** map, AVLTree ** next_map, Cell * current_cell){
+int visitNeighborsAlive(AVLTree ** map, AVLTree ** next_map, Cell * current_cell, int isCurrentCellFromBorder){
   int i, nAliveNeighbors;
   int count = 0;
 
   Cell *  neighbor_cell;
-  int neighbor_x, neighbor_y, neighbor_z;
+  int neighbor_x, neighbor_y, neighbor_z, neighbor_index;
 
   for(i=0; i<6; i++){ //Visita os 6 vizinhos de uma célula
     if (current_cell->neighbors[i] == -1){
@@ -727,9 +756,16 @@ int visitNeighborsAlive(AVLTree ** map, AVLTree ** next_map, Cell * current_cell
       neighbor_y = GET_Y(i, current_cell->y);
       neighbor_z = GET_Z(i, current_cell->z);
 
+      neighbor_index = NORMALIZE_INDEX(GET_INDEX(neighbor_x, neighbor_y), PROCESSOR_ID);
+      if (isCurrentCellFromBorder && (neighbor_index < SIZE || neighbor_index >= SIZE + PROCESSOR_CHUNK_SIZE(PROCESSOR_ID) )){
+            // Se estiver fora dos indices de interesse do processador
+            continue; // É considerada como morta
+      }
+
+
       //printf("(%d) ALIVE: %d %d %d CALLER: %d %d %d\n", PROCESSOR_ID, neighbor_x, neighbor_y, neighbor_z, current_cell->x, current_cell->y, current_cell->z);
 
-      neighbor_cell = (Cell *) findAvlTree(map[NORMALIZE_INDEX(GET_INDEX(neighbor_x, neighbor_y), PROCESSOR_ID)], neighbor_z);
+      neighbor_cell = (Cell *) findAvlTree(map[neighbor_index], neighbor_z);
 
       if (neighbor_cell != NULL){
         // A célula vizinha está viva!!
@@ -750,17 +786,17 @@ int visitNeighborsAlive(AVLTree ** map, AVLTree ** next_map, Cell * current_cell
   return count;
 }
 
-void searchTree(AVLTree ** map, AVLTree ** next_map, AVLNode * root){
+void searchTree(AVLTree ** map, AVLTree ** next_map, AVLNode * root, int isCurrentCellFromBorder){
   Cell * current_cell;
   int nAliveNeighbors;
 
   if (root != NULL){
     // Percorre a AVL Tree
-    searchTree(map, next_map, root->left);
-    searchTree(map, next_map, root->right);
+    searchTree(map, next_map, root->left, isCurrentCellFromBorder);
+    searchTree(map, next_map, root->right, isCurrentCellFromBorder);
 
     current_cell = (Cell *) root->item;
-    nAliveNeighbors = visitNeighborsAlive(map, next_map, current_cell);
+    nAliveNeighbors = visitNeighborsAlive(map, next_map, current_cell, isCurrentCellFromBorder);
     addToNewGeneration(next_map, current_cell->x, current_cell->y, current_cell->z, nAliveNeighbors, ALIVE);
   }
 }
@@ -770,9 +806,10 @@ void getNextGeneration(AVLTree ** map, AVLTree ** next_map){
 
   memset(next_map, 0, (PROCESSOR_CHUNK_SIZE(PROCESSOR_ID) + 2*SIZE)*sizeof(AVLTree *)); //Inicializa o vetor next_map com o valor NULL
 
-  for(xy= SIZE; xy<SIZE+PROCESSOR_CHUNK_SIZE(PROCESSOR_ID); xy++){
+  //for(xy= SIZE; xy<SIZE+PROCESSOR_CHUNK_SIZE(PROCESSOR_ID); xy++){
+  for(xy= 0; xy<2*SIZE+PROCESSOR_CHUNK_SIZE(PROCESSOR_ID); xy++){
     if (map[xy] != NULL){
-      searchTree(map, next_map, map[xy]->root);
+      searchTree(map, next_map, map[xy]->root, (xy < SIZE || xy >= SIZE + PROCESSOR_CHUNK_SIZE(PROCESSOR_ID) ));
     }
   }
 }
@@ -821,6 +858,7 @@ void sendOutput(AVLTree ** map){
 
   buffer_list = newList();
 
+
   for(int xy=SIZE; xy<SIZE + PROCESSOR_CHUNK_SIZE(PROCESSOR_ID); xy++){
     if (map[xy] != NULL){
       AVLTreeToListRecursive(map[xy]->root, buffer_list);
@@ -844,22 +882,21 @@ int main(int argc, char *argv[]){
   MPI_Comm_size (MPI_COMM_WORLD, &N_PROCESSORS);
 
 
-  /*
   if (argc < 3 || sscanf(argv[2],"%d", &n_generations) != 1){
     // printf("Número argumentos insuficiente\n");
     // printf("O segundo argumento não é um inteiro\n");
     MPI_Finalize();
     exit(0);
   }
-*/
-  n_generations = 1;
+
+  //n_generations = 1;
 
   MPI_Barrier(MPI_COMM_WORLD);
 
   if (!PROCESSOR_ID){
     // O processador 0 lê o mapa e distribui a informação
-    //map = loadMap(argv[1]);
-    map = loadMap("s5e50.in");
+    map = loadMap(argv[1]);
+    //map = loadMap("s5e50.in");
   } else {
     // Processadores restantes recebem informação de do processador 0
     map = receiveMap();
@@ -904,7 +941,6 @@ int main(int argc, char *argv[]){
   }
 
   MPI_Barrier(MPI_COMM_WORLD);
-
 
 
   if (!PROCESSOR_ID){
